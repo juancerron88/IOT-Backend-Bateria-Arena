@@ -1,0 +1,21 @@
+# Dependencias de Node.js
+node_modules
+
+# Builds de frontend/backend
+dist
+build
+
+# Archivos de entorno (NO subir secretos)
+.env
+.env.local
+.env.*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Archivos temporales del sistema
+.DS_Store
+Thumbs.db
