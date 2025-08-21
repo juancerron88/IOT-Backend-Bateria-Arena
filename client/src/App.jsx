@@ -41,8 +41,7 @@ export default function App() {
     });
   };
 
-// Estado lógico actual + última lectura (SIN JWT)
-// ===== Lectura de estado (SIN JWT) =====
+  // ===== Lectura de estado (SIN JWT) =====
   const fetchStatus = async () => {
     try {
       setErr("");
