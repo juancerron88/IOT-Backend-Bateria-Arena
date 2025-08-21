@@ -41,40 +41,21 @@ export default function App() {
     });
   };
 
-  // ===== Lectura de estado (SIN JWT) =====
-  const fetchStatus = async () => {
-    try {
-      setErr("");
-      const res = await fetch(`${API}/api/thermo/status?deviceId=${encodeURIComponent(deviceId)}`, {
-        cache: "no-store"
-      });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const js = await res.json();
-      const last = js.last || {};
+// Estado lógico actual + última lectura (SIN JWT)
+app.get("/api/thermo/status", async (req, res) => {
+  const { deviceId } = req.query;
+  if (!deviceId) return res.status(400).send("deviceId required");
 
-      // Si no hay 'last', probablemente aún no llegan push del Heltec
-      if (!js.last) {
-        setInfo("Aún no hay lecturas (verifica que el Heltec esté enviando /api/thermo/push -> 200).");
-      } else {
-        setInfo("");
-      }
+  const cfg = await Config.findOne({ deviceId }).lean();
+  if (!cfg) return res.status(404).send("No config");
 
-      const snap = {
-        s1: last.s1, s2: last.s2, s3: last.s3, s4: last.s4,
-        pv: last.pv,
-        sp: js.sp, h: js.h,
-        relays: { r1: !!js.relays?.r1, r2: !!js.relays?.r2 },
-        mode: js.mode === "manual" ? "manual" : "auto",
-        ts: last.ts ? new Date(last.ts).getTime() : Date.now(),
-      };
+  const last = await Reading.findOne({ deviceId }).sort({ ts: -1 }).lean();
+  const relays = last ? { r1: !!last.desiredR1, r2: !!last.desiredR2 } : { r1: false, r2: false };
 
-      setLive(snap);
-      addPoint(snap);
-    } catch (e) {
-      console.warn("fetchStatus failed", e);
-      setErr("No se pudo leer el estado del backend.");
-    }
-  };
+  // ⬅️ añadimos "last" para que App.jsx pueda pintar S1..S4 y PV
+  res.json({ deviceId, sp: cfg.sp, h: cfg.h, mode: cfg.mode, relays, last });
+});
+
 
   useEffect(() => {
     fetchStatus();
