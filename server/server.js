@@ -1,3 +1,4 @@
+// server.js
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
@@ -12,14 +13,48 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 4000;
 
+/* -------------------- CORS (multi‑origen, preflight) -------------------- */
+function parseOrigins(str) {
+  if (!str || str === "*") return "*";
+  return String(str)
+    .split(",")
+    .map(s => s.trim())
+    .filter(Boolean);
+}
+const allowedOrigins = parseOrigins(process.env.CORS_ORIGIN);
+
+// Si es "*", permitimos todo. Si es lista, validamos cada request.
+const corsOptions = {
+  origin: (origin, cb) => {
+    if (!origin) return cb(null, true); // curl / firmware
+    if (allowedOrigins === "*" || allowedOrigins.includes(origin)) {
+      return cb(null, true);
+    }
+    return cb(new Error(`CORS blocked: ${origin}`), false);
+  },
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization", "x-device-token"],
+};
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions)); // preflight
+
+/* ----------------------------- Middlewares ------------------------------ */
+app.set("trust proxy", 1); // Render/Reverse proxy
 app.use(helmet());
-app.use(cors({ origin: process.env.CORS_ORIGIN?.split(",") || "*", credentials: true }));
 app.use(express.json({ limit: "1mb" }));
 app.use(morgan("dev"));
 
-await mongoose.connect(process.env.MONGO_URI, { dbName: "onoff" });
+/* --------------------------- Conexión a Mongo --------------------------- */
+try {
+  await mongoose.connect(process.env.MONGO_URI, { dbName: "onoff" });
+  console.log("✅ MongoDB conectado");
+} catch (err) {
+  console.error("❌ Error conectando a MongoDB:", err?.message || err);
+  process.exit(1);
+}
 
-// ===== Schemas =====
+/* -------------------------------- Schemas -------------------------------- */
 const UserSchema = new mongoose.Schema({
   email: { type: String, unique: true },
   passwordHash: String,
@@ -55,7 +90,7 @@ const Device = mongoose.model("Device", DeviceSchema);
 const Config = mongoose.model("Config", ConfigSchema);
 const Reading= mongoose.model("Reading", ReadingSchema);
 
-// ===== Utils & auth =====
+/* ------------------------------- Utils/Auth ------------------------------ */
 const clamp = (n,a,b)=>Math.min(Math.max(n,a),b);
 const signJWT = (p,exp="7d") => jwt.sign(p, process.env.JWT_SECRET, { expiresIn: exp });
 const verifyJWT = (t)=> jwt.verify(t, process.env.JWT_SECRET);
@@ -67,6 +102,7 @@ function userAuth(req,res,next){
   try { req.user = verifyJWT(t); next(); }
   catch { return res.status(401).send("Invalid token"); }
 }
+
 async function deviceAuth(req,res,next){
   const tok = req.header("x-device-token");
   if (!tok) return res.status(401).send("No device token");
@@ -75,7 +111,8 @@ async function deviceAuth(req,res,next){
   req.device = dev; next();
 }
 
-// ===== Seed admin (una vez) =====
+/* ------------------------------- Rutas API ------------------------------- */
+// Seed admin (ejecutar una sola vez)
 app.post("/api/seed/admin", async (req,res)=>{
   const { email, password } = req.body || {};
   if (!email || !password) return res.status(400).json({ ok:false, error:"email/password" });
@@ -86,7 +123,7 @@ app.post("/api/seed/admin", async (req,res)=>{
   res.json({ ok:true });
 });
 
-// ===== Auth usuarios =====
+// Auth usuarios
 app.post("/api/auth/login", async (req,res)=>{
   const { email, password } = req.body || {};
   const u = await User.findOne({ email });
@@ -97,7 +134,7 @@ app.post("/api/auth/login", async (req,res)=>{
   res.json({ token, role: u.role });
 });
 
-// ===== Dispositivos (admin) =====
+// Dispositivos (admin)
 app.post("/api/devices", userAuth, async (req,res)=>{
   if (req.user.role !== "admin") return res.sendStatus(403);
   const { deviceId, name, token } = req.body || {};
@@ -106,9 +143,12 @@ app.post("/api/devices", userAuth, async (req,res)=>{
   await Config.create({ deviceId }); // config por defecto
   res.status(201).json(dev);
 });
-app.get("/api/devices", userAuth, async (req,res)=> res.json(await Device.find().lean()));
+app.get("/api/devices", userAuth, async (req,res)=> {
+  const list = await Device.find().lean();
+  res.json(list);
+});
 
-// ===== Status para dashboard (usuarios) =====
+// Status para dashboard (usuarios autenticados)
 app.get("/api/status/:deviceId", userAuth, async (req,res)=>{
   const { deviceId } = req.params;
   const cfg = await Config.findOne({ deviceId }).lean();
@@ -129,7 +169,7 @@ app.patch("/api/config/:deviceId", userAuth, async (req,res)=>{
   res.json(cfg);
 });
 
-// ===== Push lecturas desde el dispositivo =====
+// Push lecturas desde el dispositivo (firmware con x-device-token)
 app.post("/api/thermo/push", deviceAuth, async (req,res)=>{
   const { deviceId } = req.device;
   const { s1, s2, s3, s4, ts } = req.body || {};
@@ -159,10 +199,15 @@ app.post("/api/thermo/push", deviceAuth, async (req,res)=>{
     ts: ts ? new Date(ts) : new Date()
   });
 
-  res.json({ ok:true, desired:{ r1:desiredR1, r2:desiredR2 }, pv, sp: cfg.sp, h: cfg.h, mode: cfg.mode, readingId: reading._id });
+  res.json({
+    ok:true,
+    desired:{ r1:desiredR1, r2:desiredR2 },
+    pv, sp: cfg.sp, h: cfg.h, mode: cfg.mode,
+    readingId: reading._id
+  });
 });
 
-// Estado lógico actual para el dispositivo (útil si lo consultas desde firmware)
+// Estado lógico actual (firmware/cliente)
 app.get("/api/thermo/status", async (req,res)=>{
   const { deviceId } = req.query;
   if (!deviceId) return res.status(400).send("deviceId required");
@@ -173,7 +218,7 @@ app.get("/api/thermo/status", async (req,res)=>{
   res.json({ deviceId, sp: cfg.sp, h: cfg.h, mode: cfg.mode, relays });
 });
 
-// ===== Históricos y export =====
+// Históricos (JSON)
 app.get("/api/readings", userAuth, async (req,res)=>{
   const { deviceId, from, to, limit=1000 } = req.query;
   if (!deviceId) return res.status(400).send("deviceId required");
@@ -187,6 +232,7 @@ app.get("/api/readings", userAuth, async (req,res)=>{
   res.json(data);
 });
 
+// Históricos (CSV)
 app.get("/api/readings.csv", userAuth, async (req,res)=>{
   const { deviceId, from, to, limit=100000 } = req.query;
   if (!deviceId) return res.status(400).send("deviceId required");
@@ -212,4 +258,8 @@ app.get("/api/readings.csv", userAuth, async (req,res)=>{
 // Salud
 app.get("/health", (req,res)=>res.json({ ok:true }));
 
-app.listen(PORT, ()=> console.log(`Backend ON/OFF listo en http://localhost:${PORT}`));
+/* ------------------------------- Arranque ------------------------------- */
+app.listen(PORT, ()=>{
+  console.log(`🚀 Backend ON/OFF escuchando en puerto ${PORT}`);
+  console.log(`🌍 CORS_ORIGIN: ${process.env.CORS_ORIGIN || "*"}`);
+});
