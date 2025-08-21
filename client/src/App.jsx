@@ -4,12 +4,18 @@ import {
   ResponsiveContainer, Legend, ReferenceArea
 } from "recharts";
 
-// ⚙️ URL del backend tomada desde client/.env
-// Ej: VITE_API_BASE=http://localhost:4000  (en desarrollo)
-//     VITE_API_BASE=https://tu-backend.onrender.com  (en producción)
-const baseURL = import.meta.env.VITE_API_BASE;
+// Backend base URL (desde client/.env)
+const API = import.meta.env.VITE_API_BASE;
+
+// Puedes dejar este por defecto o hacerlo editable en la UI
+const DEFAULT_DEVICE_ID = "heltec-v3-01";
 
 export default function App() {
+  const [deviceId, setDeviceId] = useState(
+    localStorage.getItem("deviceId") || DEFAULT_DEVICE_ID
+  );
+  const [token, setToken] = useState(localStorage.getItem("jwt") || "");
+
   const [data, setData] = useState([]);
   const [live, setLive] = useState({
     s1: NaN, s2: NaN, s3: NaN, s4: NaN,
@@ -18,8 +24,11 @@ export default function App() {
     mode: "auto",
     ts: Date.now()
   });
+
   const [pending, setPending] = useState(false);
   const [err, setErr] = useState("");
+  const [info, setInfo] = useState("");
+
   const spRef = useRef(null);
   const hRef = useRef(null);
   const timerRef = useRef(null);
@@ -30,6 +39,7 @@ export default function App() {
   });
   const toggle = (k) => setVis(v => ({ ...v, [k]: !v[k] }));
 
+  // Helpers
   const addPoint = (snap) => {
     setData(prev => {
       const next = [...prev, { time: new Date(snap.ts).toLocaleTimeString(), ...snap }];
@@ -37,25 +47,59 @@ export default function App() {
     });
   };
 
-  // ===== Lectura de estado desde backend local (compat) =====
+  const authHeaders = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+
+  // ===== Lectura de estado =====
   const fetchStatus = async () => {
     try {
       setErr("");
-      const res = await fetch(`${baseURL}/api/thermo/status`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const js = await res.json();
-      const snap = {
-        s1: js.s1, s2: js.s2, s3: js.s3, s4: js.s4,
-        pv: js.pv, sp: js.sp, h: js.h,
-        relays: { r1: !!js.relays?.r1, r2: !!js.relays?.r2 },
-        mode: js.mode === "manual" ? "manual" : "auto",
-        ts: js.ts || Date.now(),
+      // Si tengo JWT → uso endpoint completo (incluye sensores y PV)
+      if (token) {
+        const res = await fetch(`${API}/api/status/${deviceId}`, {
+          headers: { ...authHeaders, "Cache-Control": "no-store" }
+        });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const js = await res.json();
+        const last = js?.last || {};
+        const snap = {
+          s1: last.s1, s2: last.s2, s3: last.s3, s4: last.s4,
+          pv: last.pv,
+          sp: js.sp, h: js.h,
+          relays: {
+            r1: !!last.desiredR1,
+            r2: !!last.desiredR2
+          },
+          mode: js.mode === "manual" ? "manual" : "auto",
+          ts: last.ts ? new Date(last.ts).getTime() : Date.now(),
+        };
+        setLive(snap);
+        addPoint(snap);
+        setInfo("");
+        return;
+      }
+
+      // Sin JWT → fallback (sólo SP/H/modo/relés; sin sensores)
+      const res2 = await fetch(`${API}/api/thermo/status?deviceId=${encodeURIComponent(deviceId)}`, {
+        cache: "no-store"
+      });
+      if (!res2.ok) throw new Error(`HTTP ${res2.status}`);
+      const js2 = await res2.json();
+      const snap2 = {
+        s1: NaN, s2: NaN, s3: NaN, s4: NaN,
+        pv: NaN,
+        sp: js2.sp, h: js2.h,
+        relays: { r1: !!js2.relays?.r1, r2: !!js2.relays?.r2 },
+        mode: js2.mode === "manual" ? "manual" : "auto",
+        ts: Date.now(),
       };
-      setLive(snap);
-      addPoint(snap);
+      setLive(snap2);
+      addPoint(snap2);
+      setInfo("Sugerencia: pega tu JWT para ver sensores y PV en vivo.");
     } catch (e) {
-      setErr("No se pudo leer /api/thermo/status");
-      console.warn("/status failed", e);
+      setErr("No se pudo leer el estado del backend.");
+      console.warn("fetchStatus failed", e);
     }
   };
 
@@ -63,22 +107,28 @@ export default function App() {
     fetchStatus();
     timerRef.current = setInterval(fetchStatus, 1000);
     return () => { if (timerRef.current) clearInterval(timerRef.current); };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [deviceId, token]);
 
-  // ===== Envío de comandos al backend local (compat) =====
-  const postCmd = async (body) => {
+  // ===== Envío de comandos (SP/H/Modo) =====
+  // Requiere JWT. Se hace PATCH /api/config/:deviceId
+  const patchConfig = async (patchBody) => {
     setPending(true);
     try {
-      const res = await fetch(`${baseURL}/api/thermo/cmd`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+      if (!token) {
+        setErr("Necesitas pegar tu JWT para poder modificar la configuración.");
+        return;
+      }
+      const res = await fetch(`${API}/api/config/${deviceId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...authHeaders },
+        body: JSON.stringify(patchBody),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       await fetchStatus();
     } catch (e) {
-      console.error("/cmd failed", e);
-      setErr("No se pudo enviar comando /api/thermo/cmd");
+      console.error("PATCH /config failed", e);
+      setErr("No se pudo actualizar la configuración.");
     } finally { setPending(false); }
   };
 
@@ -122,9 +172,12 @@ export default function App() {
         .sensorCard .name{ color:var(--muted); font-size:12px; margin-bottom:4px; }
         .sensorCard .val{ font-size:22px; font-weight:700; }
         .err{ margin:8px 0; color:#ffb4b4; font-size:12px; }
+        .info{ margin:8px 0; color:#a7f3d0; font-size:12px; }
         .checks{ display:grid; grid-template-columns:repeat(7, minmax(0,1fr)); gap:8px; }
         @media (max-width: 900px){ .checks{ grid-template-columns:repeat(3, minmax(0,1fr)); } }
         .check{ display:flex; align-items:center; gap:6px; font-size:12px; color:var(--muted); }
+        .topControls{ display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+        .small{ font-size:12px; color:#9ca3af; }
       `}</style>
 
       {/* Header */}
@@ -134,26 +187,28 @@ export default function App() {
           <span>Prueba de Sensores de Temperatura Tipo K</span>
         </div>
 
-        <div style={{display:"flex", alignItems:"center", gap:8}}>
-          <span className="label">Modo:&nbsp;</span>
-          <span className={`badge ${live.mode === "auto" ? "on":"off"}`}>
-            {live.mode === "auto" ? "AUTO" : "MANUAL"}
-          </span>
-          <button
-            className="btn"
-            disabled={pending}
-            style={{marginLeft:8}}
-            onClick={() => {
-              const next = live.mode === "auto" ? "manual" : "auto";
-              postCmd({ mode: next });
-            }}
-          >
-            Cambiar a {live.mode === "auto" ? "MANUAL" : "AUTO"}
-          </button>
+        {/* Panel JWT + Device */}
+        <div className="panel" style={{display:"flex", gap:8, alignItems:"center"}}>
+          <input
+            className="input"
+            placeholder="Device ID"
+            defaultValue={deviceId}
+            onBlur={(e)=>{ const v=e.target.value.trim(); setDeviceId(v); localStorage.setItem("deviceId", v); }}
+            style={{minWidth:160}}
+          />
+          <input
+            className="input"
+            placeholder="Pega tu JWT (opcional para leer sensores)"
+            defaultValue={token}
+            onBlur={(e)=>{ const v=e.target.value.trim(); setToken(v); localStorage.setItem("jwt", v); }}
+            style={{minWidth:320}}
+          />
+          <button className="btn" onClick={()=>{ fetchStatus(); }}>Refrescar</button>
         </div>
       </div>
 
       {err && <div className="err">{err}</div>}
+      {info && <div className="info">{info}</div>}
 
       {/* KPIs */}
       <div className="row grid4">
@@ -239,7 +294,7 @@ export default function App() {
         </div>
       </div>
 
-      {/* Controls */}
+      {/* Controls (SP/H/Modo) */}
       <div className="row grid2" style={{marginTop:16}}>
         <div className="panel controls">
           <div className="label">Set Point (°C)</div>
@@ -248,7 +303,7 @@ export default function App() {
             <button className="btn" disabled={pending} onClick={()=>{
               const v = parseFloat(spRef.current.value);
               if (!Number.isFinite(v)) return;
-              postCmd({ sp: v });
+              patchConfig({ sp: v });
             }}>Aplicar</button>
           </div>
 
@@ -258,23 +313,32 @@ export default function App() {
             <button className="btn" disabled={pending} onClick={()=>{
               const v = parseFloat(hRef.current.value);
               if (!Number.isFinite(v) || v <= 0) return;
-              postCmd({ h: v });
+              patchConfig({ h: v });
             }}>Aplicar</button>
           </div>
         </div>
 
         <div className="panel" style={{display:"grid", gap:12}}>
-          <div style={{display:"flex", gap:8}}>
-            <button className="btn ok" disabled={pending} onClick={()=>postCmd({ r1:true })}>R1 ON</button>
-            <button className="btn danger" disabled={pending} onClick={()=>postCmd({ r1:false })}>R1 OFF</button>
+          <div className="label">Modo</div>
+          <div style={{display:"flex", gap:8, flexWrap:"wrap"}}>
+            <button
+              className={`btn ${live.mode==="auto"?"ok":""}`}
+              disabled={pending || live.mode==="auto"}
+              onClick={()=>patchConfig({ mode:"auto" })}
+            >
+              AUTO
+            </button>
+            <button
+              className={`btn ${live.mode==="manual"?"ok":""}`}
+              disabled={pending || live.mode==="manual"}
+              onClick={()=>patchConfig({ mode:"manual" })}
+            >
+              MANUAL
+            </button>
           </div>
-          <div style={{display:"flex", gap:8}}>
-            <button className="btn ok" disabled={pending} onClick={()=>postCmd({ r2:true })}>R2 ON</button>
-            <button className="btn danger" disabled={pending} onClick={()=>postCmd({ r2:false })}>R2 OFF</button>
-          </div>
-          <div style={{display:"flex", gap:8}}>
-            <button className="btn" disabled={pending} onClick={()=>postCmd({ allOn:true })}>ALL ON</button>
-            <button className="btn" disabled={pending} onClick={()=>postCmd({ allOff:true })}>ALL OFF</button>
+
+          <div className="small">
+            * En modo <b>AUTO</b> los relés siguen la banda SP±H/2 (con tiempos mínimos 5min ON / 3min OFF definidos en el firmware).
           </div>
         </div>
       </div>
@@ -293,7 +357,7 @@ export default function App() {
 
       {/* Footer */}
       <div style={{textAlign:"center", color:"var(--muted)", fontSize:12, marginTop:16}}>
-        Backend: {baseURL} · 1 Hz
+        Backend: {API} · Device: {deviceId} · 1 Hz
       </div>
     </div>
   );
