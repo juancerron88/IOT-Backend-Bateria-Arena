@@ -213,10 +213,12 @@ app.get("/api/thermo/status", async (req,res)=>{
   if (!deviceId) return res.status(400).send("deviceId required");
   const cfg = await Config.findOne({ deviceId }).lean();
   if (!cfg) return res.status(404).send("No config");
-  const last = await Reading.findOne({ deviceId }).sort({ ts: -1 }).lean();
+  const last = await Reading.findOne({ deviceId }).sort({ ts: -1 }).lean(); // <-- añade esto
   const relays = last ? { r1: !!last.desiredR1, r2: !!last.desiredR2 } : { r1:false, r2:false };
-  res.json({ deviceId, sp: cfg.sp, h: cfg.h, mode: cfg.mode, relays });
+  // incluir last en la respuesta:
+  res.json({ deviceId, sp: cfg.sp, h: cfg.h, mode: cfg.mode, relays, last });
 });
+
 
 // Históricos (JSON)
 app.get("/api/readings", userAuth, async (req,res)=>{
